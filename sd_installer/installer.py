@@ -25,6 +25,10 @@ MANUAL_PINS = {
     "python-osc": "",  # Required for TouchDesigner OSC communication
     "peft": "0.17.1",  # Required for Cached Attention (StreamV2V) - enables USE_PEFT_BACKEND
     "protobuf": "4.25.8",  # Required by mediapipe, onnx/TensorRT - protobuf 6.x breaks serialization, setup.py requires >=4.25.8
+    # Security floor pins (transitive deps — pip resolves these on fresh install, but floor ensures upgrade on update)
+    "idna": ">=3.16",  # CVE-2026-45409: punycode resource exhaustion
+    "Mako": ">=1.3.12",  # CVE-2026-44307: Windows backslash path traversal
+    "urllib3": ">=2.7.0",  # CVE-2026-44432/44431: response over-decompression; cross-origin redirect
 }
 
 # Pre-built insightface wheels for Windows (PyPI has no Windows wheels, requires C++ build tools)
@@ -287,12 +291,19 @@ class Installer:
         self._run_pip(["--no-deps", f"opencv-python=={MANUAL_PINS['opencv-python']}"])
 
     def phase7_numpy_lock(self):
-        """Phase 7: Final numpy and protobuf lock (other packages may have upgraded them)."""
+        """Phase 7: Final numpy/protobuf lock + security floor pins."""
         self._report_progress(f"Final numpy lock (numpy=={MANUAL_PINS['numpy']})...", 7, 8)
         self._run_pip([f"numpy=={MANUAL_PINS['numpy']}", "--force-reinstall"])
 
         self._report_progress(f"Final protobuf lock (protobuf=={MANUAL_PINS['protobuf']})...", 7, 8)
         self._run_pip([f"protobuf=={MANUAL_PINS['protobuf']}", "--force-reinstall"])
+
+        self._report_progress("Applying security floor pins (idna, Mako, urllib3)...", 7, 8)
+        self._run_pip([
+            f"idna{MANUAL_PINS['idna']}",
+            f"Mako{MANUAL_PINS['Mako']}",
+            f"urllib3{MANUAL_PINS['urllib3']}",
+        ])
 
     def phase8_verify(self) -> bool:
         """Phase 8: Verify installation with import tests."""
