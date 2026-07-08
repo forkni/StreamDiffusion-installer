@@ -147,13 +147,15 @@ def install(cu: Optional[str] = None):
 
     # FP8 quantization dependencies (CUDA 12 only).
     # Previously missing — caused ImportError in fp8_quantize.py when users enabled FP8.
-    # Aligns with FLUX pyproject.toml (nvidia-modelopt >= 0.19.0).
+    # modelopt is pinned to 0.43.0 (the proven pin in tests/quality/manifest.json); an unbounded
+    # ">=0.19.0" spec floats to 0.45.0, whose [onnx] extra force-upgrades onnx to 1.21.0, which
+    # breaks FP8 quant (external-data loading -> negative QDQ scale). setup.py pins onnx==1.19.1.
     if cuda_major == "12":
         print("Installing FP8 quantization dependencies (modelopt, cupy)...")
-        run_pip("install nvidia-modelopt[onnx]>=0.19.0 cupy-cuda12x==13.6.0 numpy==1.26.4 --no-cache-dir")
-        # modelopt's resolver downgrades onnxruntime-gpu to 1.22.0; re-assert 1.24.4.
-        # --no-deps avoids triggering a conflicting re-solve.
-        run_pip("install onnxruntime-gpu==1.24.4 --no-deps --no-cache-dir")
+        run_pip("install nvidia-modelopt[onnx]==0.43.0 cupy-cuda12x==13.6.0 numpy==1.26.4 --no-cache-dir")
+        # Re-assert the setup.py-authoritative pins the modelopt resolver perturbs: it downgrades
+        # onnxruntime-gpu to 1.22.0 and upgrades onnx past 1.19.1. --no-deps avoids a re-solve.
+        run_pip("install onnx==1.19.1 onnxruntime-gpu==1.24.4 --no-deps --no-cache-dir")
 
     if platform.system() == "Windows" and not is_installed("pywin32"):
         print("Installing pywin32...")
