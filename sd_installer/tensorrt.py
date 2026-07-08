@@ -157,7 +157,7 @@ def install(cu: Optional[str] = None):
 
     if platform.system() == "Windows" and not is_installed("pywin32"):
         print("Installing pywin32...")
-        run_pip("install pywin32==306 --no-cache-dir")
+        run_pip("install pywin32==311 --no-cache-dir")
     if platform.system() == "Windows" and not is_installed("triton"):
         print("Installing triton-windows...")
         run_pip("install triton-windows==3.4.0.post21 --no-cache-dir")

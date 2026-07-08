@@ -39,6 +39,14 @@ INSIGHTFACE_WHEELS = {
     (3, 12): "https://github.com/Gourieff/Assets/raw/main/Insightface/insightface-0.7.3-cp312-cp312-win_amd64.whl",
 }
 
+# Pre-built cuda-link wheel (CUDA-IPC zero-copy transport). setup.py's cuda-link pin lives only in
+# the optional cuda_ipc extra as a git ref (compiled cp311 extension) — installing that extra would
+# force an MSVC/nvcc source build. Install the prebuilt wheel directly instead, --no-deps, so this
+# extra is never triggered. Only a cp311 wheel is published.
+CUDA_LINK_WHEELS = {
+    (3, 11): "https://github.com/forkni/cuda-link/releases/download/v1.12.0/cuda_link-1.12.0-cp311-cp311-win_amd64.whl",
+}
+
 # PyTorch configurations by CUDA version
 PYTORCH_CONFIGS = {
     "cu118": {
@@ -260,6 +268,34 @@ class Installer:
         # The -e flag makes it editable, setup.py handles all pinned versions
         self._run_pip(["-e", ".[tensorrt,controlnet,ipadapter]"], check=True, cwd=self.streamdiffusion_path)
 
+    def phase4b_cuda_link(self):
+        """Phase 4b: Install cuda-link from pre-built wheel (CUDA-IPC zero-copy transport).
+
+        Not covered by any setup.py extra actually installed above (cuda_ipc is intentionally
+        skipped to avoid a source build) — install the compiled wheel directly. Non-fatal: if no
+        wheel exists for this venv's Python, CUDA-IPC falls back to the mirror-DAT transport.
+        """
+        result = self._run_python("import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
+        if result.returncode != 0:
+            print("  WARNING: Could not detect venv Python version, skipping cuda-link pre-install")
+            return
+
+        version_str = result.stdout.strip()
+        try:
+            major, minor = map(int, version_str.split("."))
+            py_version = (major, minor)
+        except ValueError:
+            print(f"  WARNING: Could not parse Python version '{version_str}', skipping cuda-link pre-install")
+            return
+
+        wheel_url = CUDA_LINK_WHEELS.get(py_version)
+        if wheel_url:
+            self._report_progress(f"Installing cuda-link 1.12.0 from pre-built wheel (Python {version_str})...", 4, 8)
+            self._run_pip(["--no-deps", wheel_url], check=False)
+        else:
+            print(f"  WARNING: No pre-built cuda-link wheel for Python {version_str}")
+            print("  CUDA-IPC zero-copy export will fall back to the mirror-DAT transport")
+
     def phase5_missing_pins(self):
         """Phase 5: Install packages not pinned in setup.py and fix diffusers."""
         self._report_progress("Installing packages not in setup.py (timm, python-osc, peft)...", 5, 8)
@@ -324,7 +360,7 @@ class Installer:
             True if installation and verification succeeded.
         """
         print("=" * 50)
-        print(" StreamDiffusionTD v0.3.1 Installation")
+        print(" StreamDiffusionTD v0.3.2 Installation")
         print(" Daydream Fork with StreamV2V")
         print("=" * 50)
         print()
@@ -341,6 +377,7 @@ class Installer:
         self.phase3_xformers()
         self.phase3b_insightface()  # Pre-install insightface from wheel (Windows)
         self.phase4_streamdiffusion()
+        self.phase4b_cuda_link()  # Pre-install cuda-link from wheel (CUDA-IPC transport)
         self.phase5_missing_pins()
         self.phase6_conflict_prone()
         self.phase7_numpy_lock()
@@ -383,7 +420,7 @@ class Installer:
 
         content = f'''@echo off
 echo ========================================
-echo  StreamDiffusionTD v0.3.1 Installation
+echo  StreamDiffusionTD v0.3.2 Installation
 echo  Daydream Fork with StreamV2V
 echo ========================================
 
