@@ -44,7 +44,7 @@ INSIGHTFACE_WHEELS = {
 # force an MSVC/nvcc source build. Install the prebuilt wheel directly instead, --no-deps, so this
 # extra is never triggered. Only a cp311 wheel is published.
 CUDA_LINK_WHEELS = {
-    (3, 11): "https://github.com/forkni/cuda-link/releases/download/v1.12.0/cuda_link-1.12.0-cp311-cp311-win_amd64.whl",
+    (3, 11): "https://github.com/forkni/cuda-link/releases/download/v1.12.1/cuda_link-1.12.1-cp311-cp311-win_amd64.whl",
 }
 
 # PyTorch configurations by CUDA version
@@ -290,11 +290,46 @@ class Installer:
 
         wheel_url = CUDA_LINK_WHEELS.get(py_version)
         if wheel_url:
-            self._report_progress(f"Installing cuda-link 1.12.0 from pre-built wheel (Python {version_str})...", 4, 8)
+            self._report_progress(f"Installing cuda-link 1.12.1 from pre-built wheel (Python {version_str})...", 4, 8)
             self._run_pip(["--no-deps", wheel_url], check=False)
         else:
             print(f"  WARNING: No pre-built cuda-link wheel for Python {version_str}")
             print("  CUDA-IPC zero-copy export will fall back to the mirror-DAT transport")
+
+    def phase4c_cuda_link_env(self):
+        """Phase 4c: Persist CUDALINK_LIB_PATH -> this venv's site-packages (Windows only).
+
+        TouchDesigner's CUDALinkBootstrap.py reads CUDALINK_LIB_PATH at Text DAT import time to
+        enable "library mode" (sys.path injection of the installed cuda_link package, aliasing the
+        14 mirror DAT names). Persisting it here via `setx` means every TD process launched after
+        this install inherits it automatically -- no manual env-var step.
+
+        setx writes to HKCU\\Environment (user scope) and only affects processes started
+        *after* it runs, so TD must be (re)started after installation to pick it up. This
+        intentionally overwrites any prior manual value (e.g. an older cuda_link_lib\\ target).
+        Non-fatal: if setx fails or this isn't Windows, TD simply falls back to the mirror-DAT
+        classic mode.
+        """
+        if sys.platform != "win32":
+            return  # setx is a Windows-only mechanism; non-Windows TD launches are unaffected
+
+        result = self._run_python("import sysconfig; print(sysconfig.get_paths()['purelib'])")
+        if result.returncode != 0 or not result.stdout.strip():
+            print("  WARNING: Could not resolve venv site-packages path, skipping CUDALINK_LIB_PATH setup")
+            return
+
+        site_packages = result.stdout.strip()
+        self._report_progress(f"Persisting CUDALINK_LIB_PATH -> {site_packages}", 4, 8)
+        setx_result = subprocess.run(
+            ["setx", "CUDALINK_LIB_PATH", site_packages],
+            capture_output=True,
+            text=True,
+        )
+        if setx_result.returncode != 0:
+            print(f"  WARNING: setx failed to persist CUDALINK_LIB_PATH: {setx_result.stderr.strip()}")
+        else:
+            print("  CUDALINK_LIB_PATH persisted for this user account.")
+            print("  Restart TouchDesigner (and any open shells) to pick up the new environment variable.")
 
     def phase5_missing_pins(self):
         """Phase 5: Install packages not pinned in setup.py and fix diffusers."""
@@ -378,6 +413,7 @@ class Installer:
         self.phase3b_insightface()  # Pre-install insightface from wheel (Windows)
         self.phase4_streamdiffusion()
         self.phase4b_cuda_link()  # Pre-install cuda-link from wheel (CUDA-IPC transport)
+        self.phase4c_cuda_link_env()  # Persist CUDALINK_LIB_PATH -> venv (TD library mode)
         self.phase5_missing_pins()
         self.phase6_conflict_prone()
         self.phase7_numpy_lock()
