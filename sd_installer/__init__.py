@@ -16,5 +16,4 @@ __version__ = "0.3.1"
 from .installer import Installer
 from .verifier import Verifier
 
-
 __all__ = ["Installer", "Verifier", "__version__"]
