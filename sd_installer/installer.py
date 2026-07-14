@@ -304,8 +304,8 @@ class Installer:
             print("  CUDA-IPC zero-copy export will fall back to the mirror-DAT transport")
 
     def phase4c_cuda_link_env(self):
-        """Phase 4c: Persist CUDALINK_LIB_PATH, CUDALINK_DOORBELL, and SDTD_BASE_FOLDER_PATH
-        (Windows only).
+        """Phase 4c: Persist CUDALINK_LIB_PATH, CUDALINK_DOORBELL, TORCH_CUDNN_V8_API_ENABLED,
+        and SDTD_BASE_FOLDER_PATH (Windows only).
 
         CUDALINK_LIB_PATH -> this venv's site-packages:
         TouchDesigner's CUDALinkBootstrap.py reads CUDALINK_LIB_PATH at Text DAT import time to
@@ -323,6 +323,14 @@ class Installer:
         CUDALINK_TORCH_GPU_WAIT_ADAPTIVE in td_manager.py) cannot reach a separate process, so this
         must be persisted here instead. CUDALINK_WAIT_BACKEND is deliberately left unset -- its
         default "auto" already selects the native path.
+
+        TORCH_CUDNN_V8_API_ENABLED=1:
+        Opts torch into the cuDNN v8 API. Persisted here (rather than set per-launch by the TD
+        component) so there's a single declaration site, matching CUDALINK_DOORBELL above --
+        previously the TD launcher (StreamDiffusionExt.Startstream) set this in its own subprocess
+        env on every stream start, duplicated across three launch-path variants (windowless Popen,
+        PowerShell, cmd batch). It's likely a no-op on current torch (the v8 API is default-on), but
+        is kept as belt-and-suspenders now that it lives in one place instead of three.
 
         SDTD_BASE_FOLDER_PATH -> this install's base_folder (StreamDiffusion repo root):
         Same cross-process problem as CUDALINK_DOORBELL -- TD's Python process needs a reliable
@@ -377,6 +385,20 @@ class Installer:
                 print(f"  WARNING: setx failed to persist CUDALINK_DOORBELL: {db_result.stderr.strip()}")
             else:
                 print("  CUDALINK_DOORBELL=1 persisted (enables doorbell/native-wait IPC fast path).")
+
+        # TORCH_CUDNN_V8_API_ENABLED=1: single declaration site for this perf flag, replacing the
+        # three duplicated per-launch-path `env`/`set` assignments previously in
+        # StreamDiffusionExt.Startstream. Independent of the blocks above, so it runs even if
+        # either warned.
+        try:
+            cudnn_result = subprocess.run(["setx", "TORCH_CUDNN_V8_API_ENABLED", "1"], capture_output=True, text=True)
+        except OSError as setx_exc:
+            print(f"  WARNING: setx failed to persist TORCH_CUDNN_V8_API_ENABLED: {setx_exc}")
+        else:
+            if cudnn_result.returncode != 0:
+                print(f"  WARNING: setx failed to persist TORCH_CUDNN_V8_API_ENABLED: {cudnn_result.stderr.strip()}")
+            else:
+                print("  TORCH_CUDNN_V8_API_ENABLED=1 persisted.")
 
         # SDTD_BASE_FOLDER_PATH -> repo root, so TD's Python process can locate error_reports/
         # without a manual env-var step. Independent of the blocks above, so it runs even if
