@@ -16,7 +16,6 @@ import sys
 from pathlib import Path
 from typing import Callable, Optional
 
-
 # Version pins - packages NOT in setup.py that must be manually pinned
 MANUAL_PINS = {
     "numpy": "1.26.4",
@@ -44,7 +43,10 @@ INSIGHTFACE_WHEELS = {
 # force an MSVC/nvcc source build. Install the prebuilt wheel directly instead, --no-deps, so this
 # extra is never triggered. Only a cp311 wheel is published.
 CUDA_LINK_WHEELS = {
-    (3, 11): "https://github.com/forkni/cuda-link/releases/download/v1.12.0/cuda_link-1.12.0-cp311-cp311-win_amd64.whl",
+    (
+        3,
+        11,
+    ): "https://github.com/forkni/cuda-link/releases/download/v1.12.1/cuda_link-1.12.1-cp311-cp311-win_amd64.whl",
 }
 
 # PyTorch configurations by CUDA version
@@ -290,11 +292,77 @@ class Installer:
 
         wheel_url = CUDA_LINK_WHEELS.get(py_version)
         if wheel_url:
-            self._report_progress(f"Installing cuda-link 1.12.0 from pre-built wheel (Python {version_str})...", 4, 8)
+            self._report_progress(f"Installing cuda-link 1.12.1 from pre-built wheel (Python {version_str})...", 4, 8)
             self._run_pip(["--no-deps", wheel_url], check=False)
         else:
             print(f"  WARNING: No pre-built cuda-link wheel for Python {version_str}")
             print("  CUDA-IPC zero-copy export will fall back to the mirror-DAT transport")
+
+    def phase4c_cuda_link_env(self):
+        """Phase 4c: Persist CUDALINK_LIB_PATH and CUDALINK_DOORBELL (Windows only).
+
+        CUDALINK_LIB_PATH -> this venv's site-packages:
+        TouchDesigner's CUDALinkBootstrap.py reads CUDALINK_LIB_PATH at Text DAT import time to
+        enable "library mode" (sys.path injection of the installed cuda_link package, aliasing the
+        14 mirror DAT names). Persisting it here via `setx` means every TD process launched after
+        this install inherits it automatically -- no manual env-var step.
+
+        CUDALINK_DOORBELL=1:
+        Enables the Win32 named-event doorbell so the cuda-link native wait backend reaches its
+        low-latency target instead of silently falling back to poll-sleep. The SD<->TD topology is
+        bidirectional -- TD's Sender and SD's Exporter are each a producer on their own IPC leg --
+        and the doorbell event is only created by a producer whose CUDALINK_DOORBELL=1. TD's Sender
+        runs inside TD's own bundled-Python *process*, which reads its environment from user/system
+        scope only; a runtime `os.environ.setdefault` (as used for
+        CUDALINK_TORCH_GPU_WAIT_ADAPTIVE in td_manager.py) cannot reach a separate process, so this
+        must be persisted here instead. CUDALINK_WAIT_BACKEND is deliberately left unset -- its
+        default "auto" already selects the native path.
+
+        setx writes to HKCU\\Environment (user scope) and only affects processes started
+        *after* it runs, so TD must be (re)started after installation to pick it up. This
+        intentionally overwrites any prior manual value (e.g. an older cuda_link_lib\\ target).
+        Non-fatal: if setx fails or this isn't Windows, TD simply falls back to the mirror-DAT
+        classic mode (for CUDALINK_LIB_PATH) or the poll-sleep wait backend (for CUDALINK_DOORBELL).
+        """
+        if sys.platform != "win32":
+            return  # setx is a Windows-only mechanism; non-Windows TD launches are unaffected
+
+        result = self._run_python("import sysconfig; print(sysconfig.get_paths()['purelib'])")
+        if result.returncode != 0 or not result.stdout.strip():
+            print("  WARNING: Could not resolve venv site-packages path, skipping CUDALINK_LIB_PATH setup")
+        else:
+            site_packages = result.stdout.strip()
+            self._report_progress(f"Persisting CUDALINK_LIB_PATH -> {site_packages}", 4, 8)
+            try:
+                setx_result = subprocess.run(
+                    ["setx", "CUDALINK_LIB_PATH", site_packages],
+                    capture_output=True,
+                    text=True,
+                )
+            except OSError as setx_exc:
+                print(f"  WARNING: setx failed to persist CUDALINK_LIB_PATH: {setx_exc}")
+            else:
+                if setx_result.returncode != 0:
+                    print(f"  WARNING: setx failed to persist CUDALINK_LIB_PATH: {setx_result.stderr.strip()}")
+                else:
+                    print("  CUDALINK_LIB_PATH persisted for this user account.")
+                    print("  Restart TouchDesigner (and any open shells) to pick up the new environment variable.")
+
+        # CUDALINK_DOORBELL=1 enables the Win32 named-event doorbell so the cuda-link native wait
+        # backend reaches its low-latency target. Must be set on the *producer* side, and SD's TD
+        # topology is bidirectional (TD Sender + SD Exporter are both producers). TD's Sender runs
+        # in TD's own bundled-Python *process*, which reads env from user/system scope only -- a
+        # runtime os.environ.setdefault in td_manager.py can't reach it, so it must be persisted
+        # here. Independent of the site-packages resolution above, so it runs even if that warned.
+        try:
+            db_result = subprocess.run(["setx", "CUDALINK_DOORBELL", "1"], capture_output=True, text=True)
+        except OSError as setx_exc:
+            print(f"  WARNING: setx failed to persist CUDALINK_DOORBELL: {setx_exc}")
+        else:
+            if db_result.returncode != 0:
+                print(f"  WARNING: setx failed to persist CUDALINK_DOORBELL: {db_result.stderr.strip()}")
+            else:
+                print("  CUDALINK_DOORBELL=1 persisted (enables doorbell/native-wait IPC fast path).")
 
     def phase5_missing_pins(self):
         """Phase 5: Install packages not pinned in setup.py and fix diffusers."""
@@ -335,11 +403,13 @@ class Installer:
         self._run_pip([f"protobuf=={MANUAL_PINS['protobuf']}", "--force-reinstall"])
 
         self._report_progress("Applying security floor pins (idna, Mako, urllib3)...", 7, 8)
-        self._run_pip([
-            f"idna{MANUAL_PINS['idna']}",
-            f"Mako{MANUAL_PINS['Mako']}",
-            f"urllib3{MANUAL_PINS['urllib3']}",
-        ])
+        self._run_pip(
+            [
+                f"idna{MANUAL_PINS['idna']}",
+                f"Mako{MANUAL_PINS['Mako']}",
+                f"urllib3{MANUAL_PINS['urllib3']}",
+            ]
+        )
 
     def phase8_verify(self) -> bool:
         """Phase 8: Verify installation with import tests."""
@@ -378,6 +448,7 @@ class Installer:
         self.phase3b_insightface()  # Pre-install insightface from wheel (Windows)
         self.phase4_streamdiffusion()
         self.phase4b_cuda_link()  # Pre-install cuda-link from wheel (CUDA-IPC transport)
+        self.phase4c_cuda_link_env()  # Persist CUDALINK_LIB_PATH -> venv (TD library mode)
         self.phase5_missing_pins()
         self.phase6_conflict_prone()
         self.phase7_numpy_lock()
