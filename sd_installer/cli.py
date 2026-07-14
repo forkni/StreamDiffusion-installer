@@ -9,6 +9,7 @@ Usage:
     python -m sd_installer install --cuda cu128  # Install with specific CUDA
     python -m sd_installer verify             # Verify existing installation
     python -m sd_installer diagnose           # Detailed diagnostics
+    python -m sd_installer report             # Write a diagnostic report on demand
     python -m sd_installer repair             # Auto-fix known issues
     python -m sd_installer generate-bat       # Generate standalone batch file
     python -m sd_installer install-tensorrt   # Install TensorRT packages
@@ -202,6 +203,50 @@ def cmd_diagnose(args):
     return 0
 
 
+def cmd_report(args):
+    """Generate a diagnostic report on demand (no failure required)."""
+    from .report import write_error_report
+
+    try:
+        base = Path(args.base_folder) if args.base_folder else find_base_folder()
+    except RuntimeError as e:
+        print(f"ERROR: {e}")
+        return 1
+
+    # Find Python executable in venv
+    venv_path = base / "venv"
+    if sys.platform == "win32":
+        python_exe = venv_path / "Scripts" / "python.exe"
+    else:
+        python_exe = venv_path / "bin" / "python"
+
+    if not python_exe.exists():
+        print(f"ERROR: Virtual environment not found at {venv_path}")
+        return 1
+
+    print("Generating StreamDiffusionTD Diagnostic Report")
+    print("=" * 40)
+
+    out_dir = Path(args.output) if args.output else base / "error_reports"
+    report_path = write_error_report(
+        out_dir,
+        {
+            "stage": "installation",
+            "phase": "manual",
+            "python_exe": str(python_exe),
+            "base_folder": str(base),
+            "venv_path": str(venv_path),
+        },
+    )
+
+    if report_path:
+        print(f"\nReport written to: {report_path}")
+        return 0
+
+    print("ERROR: Failed to write report.")
+    return 1
+
+
 def cmd_repair(args):
     """Auto-fix known issues."""
     from .verifier import Verifier
@@ -383,6 +428,14 @@ def main():
     # diagnose command
     diagnose_parser = subparsers.add_parser("diagnose", help="Run detailed diagnostics")
     diagnose_parser.set_defaults(func=cmd_diagnose)
+
+    # report command
+    report_parser = subparsers.add_parser("report", help="Generate a diagnostic report on demand")
+    report_parser.add_argument(
+        "--output",
+        help="Directory to write the report into (default: base folder/error_reports)",
+    )
+    report_parser.set_defaults(func=cmd_report)
 
     # repair command
     repair_parser = subparsers.add_parser("repair", help="Auto-fix known issues")

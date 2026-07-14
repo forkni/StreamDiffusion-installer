@@ -120,6 +120,10 @@ class Installer:
 
         self.pytorch_config = PYTORCH_CONFIGS[cuda_version]
 
+        # Populated during install() for the on-failure diagnostic report (see report.py).
+        self.current_phase: Optional[str] = None
+        self._last_pip_stderr: Optional[str] = None
+
     @property
     def python_exe(self) -> Path:
         """Path to Python executable in venv."""
@@ -154,6 +158,7 @@ class Installer:
         )
         if check and result.returncode != 0:
             print(f"  STDERR: {result.stderr}")
+            self._last_pip_stderr = result.stderr
             raise RuntimeError(f"pip failed: {result.stderr}")
         return result
 
@@ -299,7 +304,8 @@ class Installer:
             print("  CUDA-IPC zero-copy export will fall back to the mirror-DAT transport")
 
     def phase4c_cuda_link_env(self):
-        """Phase 4c: Persist CUDALINK_LIB_PATH and CUDALINK_DOORBELL (Windows only).
+        """Phase 4c: Persist CUDALINK_LIB_PATH, CUDALINK_DOORBELL, and SDTD_BASE_FOLDER_PATH
+        (Windows only).
 
         CUDALINK_LIB_PATH -> this venv's site-packages:
         TouchDesigner's CUDALinkBootstrap.py reads CUDALINK_LIB_PATH at Text DAT import time to
@@ -318,11 +324,19 @@ class Installer:
         must be persisted here instead. CUDALINK_WAIT_BACKEND is deliberately left unset -- its
         default "auto" already selects the native path.
 
+        SDTD_BASE_FOLDER_PATH -> this install's base_folder (StreamDiffusion repo root):
+        Same cross-process problem as CUDALINK_DOORBELL -- TD's Python process needs a reliable
+        anchor to the repo root for the inference-side error-report dump
+        (streamdiffusion.utils.diagnostics.write_error_report), and a runtime os.environ.setdefault
+        in td_manager.py can't reach that separate process. Persisting it here means every
+        TD-launched Python inherits it without a manual env-var step.
+
         setx writes to HKCU\\Environment (user scope) and only affects processes started
         *after* it runs, so TD must be (re)started after installation to pick it up. This
         intentionally overwrites any prior manual value (e.g. an older cuda_link_lib\\ target).
         Non-fatal: if setx fails or this isn't Windows, TD simply falls back to the mirror-DAT
-        classic mode (for CUDALINK_LIB_PATH) or the poll-sleep wait backend (for CUDALINK_DOORBELL).
+        classic mode (for CUDALINK_LIB_PATH), the poll-sleep wait backend (for CUDALINK_DOORBELL),
+        or the diagnostics module's own __file__-relative fallback (for SDTD_BASE_FOLDER_PATH).
         """
         if sys.platform != "win32":
             return  # setx is a Windows-only mechanism; non-Windows TD launches are unaffected
@@ -363,6 +377,17 @@ class Installer:
                 print(f"  WARNING: setx failed to persist CUDALINK_DOORBELL: {db_result.stderr.strip()}")
             else:
                 print("  CUDALINK_DOORBELL=1 persisted (enables doorbell/native-wait IPC fast path).")
+
+        # SDTD_BASE_FOLDER_PATH -> repo root, so TD's Python process can locate error_reports/
+        # without a manual env-var step. Independent of the blocks above, so it runs even if
+        # either warned.
+        base_result = subprocess.run(
+            ["setx", "SDTD_BASE_FOLDER_PATH", str(self.base_folder)], capture_output=True, text=True
+        )
+        if base_result.returncode != 0:
+            print(f"  WARNING: setx failed to persist SDTD_BASE_FOLDER_PATH: {base_result.stderr.strip()}")
+        else:
+            print(f"  SDTD_BASE_FOLDER_PATH={self.base_folder} persisted (anchors error-report dumps).")
 
     def phase5_missing_pins(self):
         """Phase 5: Install packages not pinned in setup.py and fix diffusers."""
@@ -419,6 +444,31 @@ class Installer:
         verifier = Verifier(str(self.python_exe))
         return verifier.run_all()
 
+    def _write_install_error_report(self, exc: BaseException) -> None:
+        """Best-effort diagnostic dump on install failure. Never raises -- a bug here must
+        not mask the real installation error, which the caller re-raises regardless."""
+        try:
+            from .report import write_error_report
+
+            report_path = write_error_report(
+                self.base_folder / "error_reports",
+                {
+                    "stage": "installation",
+                    "exc": exc,
+                    "phase": self.current_phase,
+                    "python_exe": str(self.python_exe),
+                    "base_folder": str(self.base_folder),
+                    "cuda_version": self.cuda_version,
+                    "pytorch_config": self.pytorch_config,
+                    "venv_path": str(self.venv_path),
+                    "pip_stderr": self._last_pip_stderr,
+                },
+            )
+            if report_path:
+                print(f"\n  Error report written to: {report_path}")
+        except Exception as report_exc:
+            print(f"  WARNING: Failed to generate error report: {report_exc}")
+
     def install(self, python_exe: Optional[str] = None) -> bool:
         """
         Run full installation.
@@ -441,18 +491,30 @@ class Installer:
         # Create venv if needed
         self.create_venv(python_exe)
 
-        # Run installation phases
-        self.phase1_foundation()
-        self.phase2_pytorch()
-        self.phase3_xformers()
-        self.phase3b_insightface()  # Pre-install insightface from wheel (Windows)
-        self.phase4_streamdiffusion()
-        self.phase4b_cuda_link()  # Pre-install cuda-link from wheel (CUDA-IPC transport)
-        self.phase4c_cuda_link_env()  # Persist CUDALINK_LIB_PATH -> venv (TD library mode)
-        self.phase5_missing_pins()
-        self.phase6_conflict_prone()
-        self.phase7_numpy_lock()
-        success = self.phase8_verify()
+        # Run installation phases. current_phase is tracked so a failure report (see
+        # _write_install_error_report) can name the phase that was running when it broke.
+        phases = [
+            ("phase1_foundation", self.phase1_foundation),
+            ("phase2_pytorch", self.phase2_pytorch),
+            ("phase3_xformers", self.phase3_xformers),
+            ("phase3b_insightface", self.phase3b_insightface),  # insightface from wheel (Windows)
+            ("phase4_streamdiffusion", self.phase4_streamdiffusion),
+            ("phase4b_cuda_link", self.phase4b_cuda_link),  # cuda-link from wheel (CUDA-IPC transport)
+            ("phase4c_cuda_link_env", self.phase4c_cuda_link_env),  # CUDALINK_LIB_PATH -> venv (TD library mode)
+            ("phase5_missing_pins", self.phase5_missing_pins),
+            ("phase6_conflict_prone", self.phase6_conflict_prone),
+            ("phase7_numpy_lock", self.phase7_numpy_lock),
+        ]
+
+        try:
+            for name, phase_fn in phases:
+                self.current_phase = name
+                phase_fn()
+            self.current_phase = "phase8_verify"
+            success = self.phase8_verify()
+        except Exception as exc:
+            self._write_install_error_report(exc)
+            raise
 
         print()
         print("=" * 50)
