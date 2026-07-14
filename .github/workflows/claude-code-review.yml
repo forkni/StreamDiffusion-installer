@@ -30,7 +30,7 @@ jobs:
           plugins: "code-review@claude-code-plugins"
           prompt: "/code-review:code-review ${{ github.repository }}/pull/${{ github.event.pull_request.number }}"
           claude_args: >-
-            --max-turns 60
+            --max-turns 120
             --allowedTools "Bash(git diff:*),Bash(git status:*),Bash(git log:*),Bash(git fetch:*),Bash(git merge-base:*),Bash(git rev-parse:*),Bash(git remote:*),Bash(git branch:*),Bash(git show:*),Bash(echo:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh release view:*),Bash(python:*),Bash(python3:*),Bash(pytest:*),Skill,Write(/tmp/*)"
             --append-system-prompt "Repo-specific focus: this is a Windows CLI installer that shells out to
             pip/nvidia-smi/conda and drives multi-phase installs (cuda-link, torch, modelopt, onnx, tensorrt).
