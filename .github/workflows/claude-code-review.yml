@@ -1,0 +1,47 @@
+name: Claude Code Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    # base-branch filter: PRs *into* main, or into the deps stack that
+    # feat/installer-error-report chains on, so Claude fires on both stacked PRs.
+    branches: [main, deps/cuda-link-1.12-torch-modelopt-onnx]
+
+jobs:
+  review:
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+
+      - uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          track_progress: true # forces tag mode -> sticky comment updates in place
+          use_sticky_comment: true # one review comment across pushes, not a new one each time
+          show_full_output: true # surfaces full tool output/denials in the run log for debugging
+          plugin_marketplaces: "https://github.com/anthropics/claude-code.git"
+          plugins: "code-review@claude-code-plugins"
+          prompt: "/code-review:code-review ${{ github.repository }}/pull/${{ github.event.pull_request.number }}"
+          claude_args: >-
+            --max-turns 60
+            --allowedTools "Bash(git diff:*),Bash(git status:*),Bash(git log:*),Bash(git fetch:*),Bash(git merge-base:*),Bash(git rev-parse:*),Bash(git remote:*),Bash(git branch:*),Bash(git show:*),Bash(echo:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh release view:*),Bash(python:*),Bash(python3:*),Bash(pytest:*),Skill,Write(/tmp/*)"
+            --append-system-prompt "Repo-specific focus: this is a Windows CLI installer that shells out to
+            pip/nvidia-smi/conda and drives multi-phase installs (cuda-link, torch, modelopt, onnx, tensorrt).
+            Flag subprocess calls that are shell=True with unsanitized/user-influenced input, install phases
+            that leave the environment partially-modified on failure without a clear rollback or resumable
+            state, and any place a secret-shaped env var (TOKEN/KEY/SECRET/PASSWORD/CRED) could leak into a
+            log or error report -- see sd_installer/report.py's ENV_ALLOWLIST_PREFIXES/ENV_DENYLIST_SUBSTRINGS
+            pattern, which is the intentional convention to follow, not duplicate ad hoc. Error-reporting code
+            (report.py, installer.py's _write_install_error_report) must stay best-effort: it must never raise
+            past its own try/except, since a reporting bug must not mask the real install failure. Skip generic
+            style nits.
+            Tool usage: never run filesystem-wide search (find /, grep -r /), stay inside the repo checkout.
+            Never redirect Bash output to a file with > or >>, it is blocked; pipe to head/tail or just read
+            the direct stdout instead."
