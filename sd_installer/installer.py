@@ -333,16 +333,20 @@ class Installer:
         else:
             site_packages = result.stdout.strip()
             self._report_progress(f"Persisting CUDALINK_LIB_PATH -> {site_packages}", 4, 8)
-            setx_result = subprocess.run(
-                ["setx", "CUDALINK_LIB_PATH", site_packages],
-                capture_output=True,
-                text=True,
-            )
-            if setx_result.returncode != 0:
-                print(f"  WARNING: setx failed to persist CUDALINK_LIB_PATH: {setx_result.stderr.strip()}")
+            try:
+                setx_result = subprocess.run(
+                    ["setx", "CUDALINK_LIB_PATH", site_packages],
+                    capture_output=True,
+                    text=True,
+                )
+            except OSError as setx_exc:
+                print(f"  WARNING: setx failed to persist CUDALINK_LIB_PATH: {setx_exc}")
             else:
-                print("  CUDALINK_LIB_PATH persisted for this user account.")
-                print("  Restart TouchDesigner (and any open shells) to pick up the new environment variable.")
+                if setx_result.returncode != 0:
+                    print(f"  WARNING: setx failed to persist CUDALINK_LIB_PATH: {setx_result.stderr.strip()}")
+                else:
+                    print("  CUDALINK_LIB_PATH persisted for this user account.")
+                    print("  Restart TouchDesigner (and any open shells) to pick up the new environment variable.")
 
         # CUDALINK_DOORBELL=1 enables the Win32 named-event doorbell so the cuda-link native wait
         # backend reaches its low-latency target. Must be set on the *producer* side, and SD's TD
@@ -350,11 +354,15 @@ class Installer:
         # in TD's own bundled-Python *process*, which reads env from user/system scope only -- a
         # runtime os.environ.setdefault in td_manager.py can't reach it, so it must be persisted
         # here. Independent of the site-packages resolution above, so it runs even if that warned.
-        db_result = subprocess.run(["setx", "CUDALINK_DOORBELL", "1"], capture_output=True, text=True)
-        if db_result.returncode != 0:
-            print(f"  WARNING: setx failed to persist CUDALINK_DOORBELL: {db_result.stderr.strip()}")
+        try:
+            db_result = subprocess.run(["setx", "CUDALINK_DOORBELL", "1"], capture_output=True, text=True)
+        except OSError as setx_exc:
+            print(f"  WARNING: setx failed to persist CUDALINK_DOORBELL: {setx_exc}")
         else:
-            print("  CUDALINK_DOORBELL=1 persisted (enables doorbell/native-wait IPC fast path).")
+            if db_result.returncode != 0:
+                print(f"  WARNING: setx failed to persist CUDALINK_DOORBELL: {db_result.stderr.strip()}")
+            else:
+                print("  CUDALINK_DOORBELL=1 persisted (enables doorbell/native-wait IPC fast path).")
 
     def phase5_missing_pins(self):
         """Phase 5: Install packages not pinned in setup.py and fix diffusers."""
