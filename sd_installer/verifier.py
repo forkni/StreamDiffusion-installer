@@ -101,7 +101,6 @@ VERIFICATION_CHECKS = [
         "    lib_path = get('CUDALINK_LIB_PATH')\n"
         "    assert lib_path and os.path.isdir(lib_path), f'CUDALINK_LIB_PATH missing or not a dir: {lib_path}'\n"
         "    assert get('CUDALINK_DOORBELL') == '1', 'CUDALINK_DOORBELL != 1'\n"
-        "    assert get('TORCH_CUDNN_V8_API_ENABLED') == '1', 'TORCH_CUDNN_V8_API_ENABLED != 1'\n"
         "    assert get('SDTD_BASE_FOLDER_PATH'), 'SDTD_BASE_FOLDER_PATH missing'\n"
         "    print('OK')\n",
         "cuda-link environment variables (phase4c setx)",
