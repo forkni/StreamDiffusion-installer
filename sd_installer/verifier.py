@@ -58,6 +58,54 @@ VERIFICATION_CHECKS = [
         "import onnx; v = onnx.__version__; parts = [int(x) for x in v.split('.')[:2]]; assert parts[0] == 1 and parts[1] < 20, f'onnx {v} (>=1.20 removes float32_to_bfloat16)'; print(v)",
         "onnx (<1.20 required for TRT)",
     ),
+    (
+        "cuda-python (bindings)",
+        "import cuda.bindings; print('OK')",
+        "cuda-python (CUDA bindings, phase2)",
+    ),
+    ("opencv (cv2)", "import cv2; print(cv2.__version__)", "opencv-python (phase6)"),
+    ("python-osc", "import pythonosc; print('OK')", "python-osc (TD OSC comms, phase5)"),
+    (
+        "cuda-link",
+        "import sys\n"
+        "if not (sys.platform == 'win32' and sys.version_info[:2] == (3, 11)):\n"
+        "    print('SKIP (cp311 Windows wheel only)')\n"
+        "else:\n"
+        "    import cuda_link\n"
+        "    print(getattr(cuda_link, '__version__', 'OK'))\n",
+        "cuda-link (CUDA-IPC zero-copy transport, phase4b)",
+    ),
+    (
+        "insightface",
+        "import sys\n"
+        "if sys.platform != 'win32':\n"
+        "    print('SKIP')\n"
+        "else:\n"
+        "    import insightface\n"
+        "    print(insightface.__version__)\n",
+        "insightface (IPAdapter face, phase3b)",
+    ),
+    (
+        "cuda-link environment variables",
+        "import sys\n"
+        "if sys.platform != 'win32':\n"
+        "    print('SKIP')\n"
+        "else:\n"
+        "    import os, winreg\n"
+        "    key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, 'Environment')\n"
+        "    def get(name):\n"
+        "        try:\n"
+        "            return winreg.QueryValueEx(key, name)[0]\n"
+        "        except FileNotFoundError:\n"
+        "            return None\n"
+        "    lib_path = get('CUDALINK_LIB_PATH')\n"
+        "    assert lib_path and os.path.isdir(lib_path), f'CUDALINK_LIB_PATH missing or not a dir: {lib_path}'\n"
+        "    assert get('CUDALINK_DOORBELL') == '1', 'CUDALINK_DOORBELL != 1'\n"
+        "    assert get('TORCH_CUDNN_V8_API_ENABLED') == '1', 'TORCH_CUDNN_V8_API_ENABLED != 1'\n"
+        "    assert get('SDTD_BASE_FOLDER_PATH'), 'SDTD_BASE_FOLDER_PATH missing'\n"
+        "    print('OK')\n",
+        "cuda-link environment variables (phase4c setx)",
+    ),
 ]
 
 
@@ -224,6 +272,11 @@ class Verifier:
             ("peft", "import peft; print(peft.__version__)"),
             ("protobuf", "import google.protobuf; print(google.protobuf.__version__)"),
             ("tensorrt", "import tensorrt; print(tensorrt.__version__)"),
+            ("cuda_link", "import cuda_link; print(getattr(cuda_link, '__version__', 'OK'))"),
+            ("cuda-python", "import cuda.bindings; print('OK')"),
+            ("insightface", "import insightface; print(insightface.__version__)"),
+            ("python-osc", "import pythonosc; print('OK')"),
+            ("opencv-python", "import cv2; print(cv2.__version__)"),
         ]
 
         for pkg, code in version_checks:
@@ -285,6 +338,10 @@ KNOWN_ERRORS = {
     "Failed to serialize proto": {
         "cause": "protobuf version too new (6.x) - breaks ONNX model serialization during TensorRT engine build",
         "fix": "pip install protobuf==4.25.3 --force-reinstall",
+    },
+    "No module named 'cuda_link'": {
+        "cause": "cuda-link wheel not installed (phase4b) - only ships a cp311 Windows wheel",
+        "fix": "Re-run install; on cp311/Windows this installs the forkni cuda_link wheel via --no-deps",
     },
 }
 

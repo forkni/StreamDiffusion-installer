@@ -34,6 +34,70 @@ def version(package_name: str) -> Optional[str]:
         return None
 
 
+def verify(cu: Optional[str] = None) -> bool:
+    """
+    Verify the TensorRT install by importing/checking every package installed
+    by install(). Unlike the main sd_installer verifier ([8/8] VERIFICATION_CHECKS
+    in verifier.py), this covers the TensorRT step specifically, since TensorRT is
+    a separate, optional UI-button install and previously had no verification at all.
+
+    Args:
+        cu: CUDA version string used for the install (e.g. "12.8"). Auto-detected if None.
+
+    Returns:
+        True if all applicable checks passed, False otherwise.
+    """
+    if cu is None:
+        cu = get_cuda_version_from_torch()
+    cuda_major = cu.split(".")[0] if cu else "12"
+
+    print()
+    print("TensorRT Verification")
+    print("=" * 40)
+
+    checks = []  # (name, passed, detail)
+
+    def try_import(mod_name: str, label: Optional[str] = None):
+        label = label or mod_name
+        try:
+            mod = __import__(mod_name)
+            checks.append((label, True, getattr(mod, "__version__", "OK")))
+        except Exception as e:
+            checks.append((label, False, str(e)))
+
+    def check_dist(dist_name: str):
+        v = version(dist_name)
+        checks.append((dist_name, v is not None, v or "not installed"))
+
+    # Functional checks - these actually load the native libs.
+    try_import("tensorrt")
+    try_import("polygraphy")
+    try_import("onnx_graphsurgeon", "onnx-graphsurgeon")
+
+    # Distribution-presence checks - avoid heavy/CUDA-init imports for these.
+    if cuda_major == "12":
+        check_dist("nvidia-cudnn-cu12")
+        check_dist("nvidia-modelopt")
+        check_dist("cupy-cuda12x")
+    elif cuda_major == "11":
+        check_dist("nvidia-cudnn-cu11")
+
+    if platform.system() == "Windows":
+        check_dist("pywin32")
+        try_import("triton")
+
+    passed = sum(1 for _, ok, _ in checks if ok)
+    failed = len(checks) - passed
+
+    for name, ok, detail in checks:
+        print(f"{'  OK' if ok else 'FAIL'}: {name}: {detail}")
+
+    print()
+    print(f"Results: {passed} passed, {failed} failed")
+
+    return failed == 0
+
+
 def get_cuda_version_from_torch() -> Optional[str]:
     """Get CUDA version from installed PyTorch"""
     try:
@@ -164,8 +228,12 @@ def install(cu: Optional[str] = None):
         print("Installing triton-windows...")
         run_pip("install triton-windows==3.4.0.post21 --no-cache-dir")
 
-    print("TensorRT installation completed successfully!")
-    return True
+    ok = verify(cu)
+    if ok:
+        print("TensorRT installation completed successfully!")
+    else:
+        print("TensorRT installation completed, but verification found issues (see above).")
+    return ok
 
 
 if __name__ == "__main__":
