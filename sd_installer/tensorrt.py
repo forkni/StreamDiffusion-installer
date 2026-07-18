@@ -4,15 +4,25 @@ TensorRT installation for StreamDiffusionTD
 Standalone module that doesn't rely on streamdiffusion package imports.
 """
 
+import importlib
 import platform
 import subprocess
 import sys
+import time
 from typing import Optional
 
 
-def run_pip(command: str):
-    """Run pip command with proper error handling"""
-    return subprocess.check_call([sys.executable, "-m", "pip"] + command.split())
+def run_pip(command: str, retries: int = 2):
+    """Run pip command with proper error handling; retry a couple times for flaky indexes."""
+    args = [sys.executable, "-m", "pip"] + command.split()
+    for attempt in range(retries + 1):
+        try:
+            return subprocess.check_call(args)
+        except subprocess.CalledProcessError:
+            if attempt >= retries:
+                raise
+            print(f"  pip failed (attempt {attempt + 1}/{retries + 1}), retrying: {command}")
+            time.sleep(3)
 
 
 def is_installed(package_name: str) -> bool:
@@ -32,6 +42,29 @@ def version(package_name: str) -> Optional[str]:
         return importlib.metadata.version(package_name)
     except Exception:
         return None
+
+
+def _import_ok(module: str) -> bool:
+    """True if `module` imports in a fresh interpreter. A subprocess avoids this
+    process's stale import caches after a pip install ran in another subprocess."""
+    return (
+        subprocess.run([sys.executable, "-c", f"import {module}"], capture_output=True).returncode
+        == 0
+    )
+
+
+def ensure_wrapper(module: str, spec: str, index_url: str):
+    """Repair the empty-wrapper state: pip reports the dist already satisfied
+    (dist-info present) but the top-level package dir is missing, so `import
+    <module>` fails. --force-reinstall rebuilds the wrapper from sdist; --no-deps
+    leaves the intact bindings/libs wheels untouched.
+    """
+    if _import_ok(module):
+        return
+    print(f"'{module}' import failed after install; repairing wrapper package...")
+    run_pip(f"install --force-reinstall --no-deps --no-cache-dir --extra-index-url {index_url} {spec}")
+    if not _import_ok(module):
+        print(f"WARNING: '{module}' still not importable after repair.")
 
 
 def verify(cu: Optional[str] = None) -> bool:
@@ -168,6 +201,7 @@ def install(cu: Optional[str] = None):
         trt_version = "10.16.1.11"
         print(f"Installing TensorRT {trt_version} for CUDA {cu}...")
         run_pip(f"install --extra-index-url https://pypi.nvidia.com tensorrt_cu12=={trt_version} --no-cache-dir")
+        ensure_wrapper("tensorrt", f"tensorrt_cu12=={trt_version}", "https://pypi.nvidia.com")
 
     elif cuda_major == "12":
         print("Installing TensorRT for CUDA 12.x...")
@@ -183,6 +217,7 @@ def install(cu: Optional[str] = None):
         trt_version = "10.16.1.11"
         print(f"Installing TensorRT {trt_version} for CUDA {cu}...")
         run_pip(f"install --extra-index-url https://pypi.nvidia.com tensorrt_cu12=={trt_version} --no-cache-dir")
+        ensure_wrapper("tensorrt", f"tensorrt_cu12=={trt_version}", "https://pypi.nvidia.com")
 
     elif cuda_major == "11":
         print("Installing TensorRT for CUDA 11.x...")
@@ -196,6 +231,7 @@ def install(cu: Optional[str] = None):
         tensorrt_version = "tensorrt==9.0.1.post11.dev4"
         print(f"Installing TensorRT for CUDA {cu}: {tensorrt_version}")
         run_pip(f"install --extra-index-url https://pypi.nvidia.com {tensorrt_version} --no-cache-dir")
+        ensure_wrapper("tensorrt", tensorrt_version, "https://pypi.nvidia.com")
     else:
         print(f"Unsupported CUDA version: {cu}")
         print("Supported versions: CUDA 11.x, 12.x, 12.8+")
@@ -228,6 +264,9 @@ def install(cu: Optional[str] = None):
         print("Installing triton-windows...")
         run_pip("install triton-windows==3.4.0.post21 --no-cache-dir")
 
+    # verify() runs in-process; without this it can still see the stale (pre-repair)
+    # import cache for a module that ensure_wrapper() just rebuilt on disk.
+    importlib.invalidate_caches()
     ok = verify(cu)
     if ok:
         print("TensorRT installation completed successfully!")
