@@ -46,9 +46,14 @@ def version(package_name: str) -> Optional[str]:
 
 def _import_ok(module: str) -> bool:
     """True if `module` imports in a fresh interpreter. A subprocess avoids this
-    process's stale import caches after a pip install ran in another subprocess."""
+    process's stale import caches after a pip install ran in another subprocess.
+    The module name is passed as an argv value (not interpolated into the -c
+    string) so it can't be abused to inject arbitrary code."""
     return (
-        subprocess.run([sys.executable, "-c", f"import {module}"], capture_output=True).returncode
+        subprocess.run(
+            [sys.executable, "-c", "import importlib, sys; importlib.import_module(sys.argv[1])", module],
+            capture_output=True,
+        ).returncode
         == 0
     )
 
@@ -57,12 +62,19 @@ def ensure_wrapper(module: str, spec: str, index_url: str):
     """Repair the empty-wrapper state: pip reports the dist already satisfied
     (dist-info present) but the top-level package dir is missing, so `import
     <module>` fails. --force-reinstall rebuilds the wrapper from sdist; --no-deps
-    leaves the intact bindings/libs wheels untouched.
+    leaves the intact bindings/libs wheels untouched. Best-effort: if the repair
+    pip call itself fails (e.g. retries exhausted on a flaky index), warn and
+    return rather than raising, so install() still reaches the remaining steps
+    and verify() instead of aborting with an unhandled traceback.
     """
     if _import_ok(module):
         return
     print(f"'{module}' import failed after install; repairing wrapper package...")
-    run_pip(f"install --force-reinstall --no-deps --no-cache-dir --extra-index-url {index_url} {spec}")
+    try:
+        run_pip(f"install --force-reinstall --no-deps --no-cache-dir --extra-index-url {index_url} {spec}")
+    except subprocess.CalledProcessError:
+        print(f"WARNING: repair install for '{module}' failed; continuing without it.")
+        return
     if not _import_ok(module):
         print(f"WARNING: '{module}' still not importable after repair.")
 
@@ -264,8 +276,11 @@ def install(cu: Optional[str] = None):
         print("Installing triton-windows...")
         run_pip("install triton-windows==3.4.0.post21 --no-cache-dir")
 
-    # verify() runs in-process; without this it can still see the stale (pre-repair)
-    # import cache for a module that ensure_wrapper() just rebuilt on disk.
+    # verify() runs in-process; drop any modules install() may have already imported
+    # (via is_installed()) and invalidate the finder caches, so verify() picks up a
+    # module ensure_wrapper() just rebuilt on disk rather than a stale sys.modules entry.
+    for _m in ("tensorrt", "polygraphy", "onnx_graphsurgeon"):
+        sys.modules.pop(_m, None)
     importlib.invalidate_caches()
     ok = verify(cu)
     if ok:
