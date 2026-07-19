@@ -264,10 +264,23 @@ def install(cu: Optional[str] = None):
     # breaks FP8 quant (external-data loading -> negative QDQ scale). setup.py pins onnx==1.19.1.
     if cuda_major == "12":
         print("Installing FP8 quantization dependencies (modelopt, cupy)...")
-        run_pip("install nvidia-modelopt[onnx]==0.43.0 cupy-cuda12x==13.6.0 numpy==1.26.4 --no-cache-dir")
-        # Re-assert the setup.py-authoritative pins the modelopt resolver perturbs: it downgrades
-        # onnxruntime-gpu to 1.22.0 and upgrades onnx past 1.19.1. --no-deps avoids a re-solve.
-        run_pip("install onnx==1.19.1 onnxruntime-gpu==1.24.4 --no-deps --no-cache-dir")
+        # nvidia-modelopt[onnx]==0.43.0 hard-pins onnxruntime-gpu==1.22.0 on Windows (its METADATA:
+        # `Requires-Dist: onnxruntime-gpu==1.22.0; platform_system == "Windows" and extra == "onnx"`),
+        # so requesting the [onnx] extra force-downgrades our setup.py-authoritative
+        # onnxruntime-gpu==1.24.4 to 1.22.0 (~215 MB) only to re-install 1.24.4 (~207 MB) seconds
+        # later. Install modelopt WITHOUT the extra and enumerate the extra's deps explicitly,
+        # substituting our own onnx/onnxruntime-gpu pins — modelopt core has no onnx requirement, so
+        # 1.22.0 never enters the resolve. modelopt is version-pinned, so this dep list is
+        # deterministic; re-check it against nvidia_modelopt-<ver>.dist-info/METADATA (the
+        # `extra == "onnx"` Requires-Dist lines) if the modelopt pin is ever bumped. onnx-graphsurgeon
+        # and polygraphy (also [onnx] deps) are installed above from the NVIDIA index — already
+        # satisfied, intentionally not re-listed.
+        run_pip(
+            "install nvidia-modelopt==0.43.0 "
+            "cppimport lief ml_dtypes onnxconverter-common~=1.16.0 onnxscript onnxslim>=0.1.76 "
+            "onnx==1.19.1 onnxruntime-gpu==1.24.4 "
+            "cupy-cuda12x==13.6.0 numpy==1.26.4 --no-cache-dir"
+        )
 
     if platform.system() == "Windows" and not is_installed("pywin32"):
         print("Installing pywin32...")
