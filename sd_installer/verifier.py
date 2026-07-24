@@ -32,6 +32,11 @@ VERIFICATION_CHECKS = [
     ("transformers MT5", "from transformers import MT5Tokenizer; print('OK')", "transformers (MT5Tokenizer)"),
     ("huggingface_hub", "from huggingface_hub import hf_hub_download; print('OK')", "huggingface_hub"),
     (
+        "hf_xet",
+        "import hf_xet; print(getattr(hf_xet, '__version__', 'OK'))",
+        "hf_xet (Xet transport, phase5)",
+    ),
+    (
         "numpy version",
         "import numpy; v = numpy.__version__; assert v.startswith('1.'), f'numpy 2.x detected: {v}'; print(v)",
         "numpy (<2.0.0 required)",

@@ -28,6 +28,10 @@ MANUAL_PINS = {
     "idna": ">=3.16",  # CVE-2026-45409: punycode resource exhaustion
     "Mako": ">=1.3.12",  # CVE-2026-44307: Windows backslash path traversal
     "urllib3": ">=2.7.0",  # CVE-2026-44432/44431: response over-decompression; cross-origin redirect
+    # Most Hub repos (e.g. stabilityai/sd-turbo) are Xet-backed. Without hf_xet, huggingface_hub
+    # falls back to plain HTTP through cas-bridge.xethub.hf.co, which is markedly slower and far
+    # more prone to read-timeout/retry storms on unstable links.
+    "hf_xet": "",
 }
 
 # Pre-built insightface wheels for Windows (PyPI has no Windows wheels, requires C++ build tools)
@@ -391,10 +395,11 @@ class Installer:
 
     def phase5_missing_pins(self):
         """Phase 5: Install packages not pinned in setup.py and fix diffusers."""
-        self._report_progress("Installing packages not in setup.py (timm, python-osc, peft)...", 5, 8)
+        self._report_progress("Installing packages not in setup.py (timm, python-osc, peft, hf_xet)...", 5, 8)
         self._run_pip([f"timm{MANUAL_PINS['timm']}"])
         self._run_pip(["python-osc"])  # Required for TouchDesigner OSC communication
         self._run_pip([f"peft=={MANUAL_PINS['peft']}"])  # Required for Cached Attention (StreamV2V)
+        self._run_pip(["hf_xet"])  # Native Xet transport for HuggingFace Hub downloads
 
         # Force reinstall varshith15 diffusers (other deps may have overwritten it)
         self._report_progress("Ensuring varshith15 diffusers fork with kvo_cache support...", 5, 8)
