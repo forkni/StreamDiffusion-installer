@@ -11,12 +11,10 @@ Philosophy:
 5. Verify imports - Catch failures immediately
 """
 
-import os
-import sys
 import subprocess
-import shutil
+import sys
 from pathlib import Path
-from typing import Optional, Callable
+from typing import Callable, Optional
 
 # Version pins - packages NOT in setup.py that must be manually pinned
 MANUAL_PINS = {
@@ -26,6 +24,14 @@ MANUAL_PINS = {
     "python-osc": "",  # Required for TouchDesigner OSC communication
     "peft": "0.17.1",  # Required for Cached Attention (StreamV2V) - enables USE_PEFT_BACKEND
     "protobuf": "4.25.8",  # Required by mediapipe, onnx/TensorRT - protobuf 6.x breaks serialization, setup.py requires >=4.25.8
+    # Security floor pins (transitive deps — pip resolves these on fresh install, but floor ensures upgrade on update)
+    "idna": ">=3.16",  # CVE-2026-45409: punycode resource exhaustion
+    "Mako": ">=1.3.12",  # CVE-2026-44307: Windows backslash path traversal
+    "urllib3": ">=2.7.0",  # CVE-2026-44432/44431: response over-decompression; cross-origin redirect
+    # Most Hub repos (e.g. stabilityai/sd-turbo) are Xet-backed. Without hf_xet, huggingface_hub
+    # falls back to plain HTTP through cas-bridge.xethub.hf.co, which is markedly slower and far
+    # more prone to read-timeout/retry storms on unstable links.
+    "hf_xet": "",
 }
 
 # Pre-built insightface wheels for Windows (PyPI has no Windows wheels, requires C++ build tools)
@@ -34,6 +40,17 @@ INSIGHTFACE_WHEELS = {
     (3, 10): "https://github.com/Gourieff/Assets/raw/main/Insightface/insightface-0.7.3-cp310-cp310-win_amd64.whl",
     (3, 11): "https://github.com/Gourieff/Assets/raw/main/Insightface/insightface-0.7.3-cp311-cp311-win_amd64.whl",
     (3, 12): "https://github.com/Gourieff/Assets/raw/main/Insightface/insightface-0.7.3-cp312-cp312-win_amd64.whl",
+}
+
+# Pre-built cuda-link wheel (CUDA-IPC zero-copy transport). setup.py's cuda-link pin lives only in
+# the optional cuda_ipc extra as a git ref (compiled cp311 extension) — installing that extra would
+# force an MSVC/nvcc source build. Install the prebuilt wheel directly instead, --no-deps, so this
+# extra is never triggered. Only a cp311 wheel is published.
+CUDA_LINK_WHEELS = {
+    (
+        3,
+        11,
+    ): "https://github.com/forkni/cuda-link/releases/download/v1.12.1/cuda_link-1.12.1-cp311-cp311-win_amd64.whl",
 }
 
 # PyTorch configurations by CUDA version
@@ -63,9 +80,9 @@ PYTORCH_CONFIGS = {
         "xformers": None,  # Skip - causes conflicts
     },
     "cu128": {
-        "torch": "2.7.0",
-        "torchvision": "0.22.0",
-        "torchaudio": "2.7.0",
+        "torch": "2.8.0",
+        "torchvision": "0.23.0",
+        "torchaudio": None,
         "index_url": "https://download.pytorch.org/whl/cu128",
         "cuda_python": "12.9.0",
         "xformers": None,  # Not needed - PyTorch 2.7+ has native SDPA
@@ -103,12 +120,13 @@ class Installer:
 
         # Validate CUDA version
         if cuda_version not in PYTORCH_CONFIGS:
-            raise ValueError(
-                f"Unsupported CUDA version: {cuda_version}. "
-                f"Supported: {list(PYTORCH_CONFIGS.keys())}"
-            )
+            raise ValueError(f"Unsupported CUDA version: {cuda_version}. Supported: {list(PYTORCH_CONFIGS.keys())}")
 
         self.pytorch_config = PYTORCH_CONFIGS[cuda_version]
+
+        # Populated during install() for the on-failure diagnostic report (see report.py).
+        self.current_phase: Optional[str] = None
+        self._last_pip_stderr: Optional[str] = None
 
     @property
     def python_exe(self) -> Path:
@@ -144,6 +162,7 @@ class Installer:
         )
         if check and result.returncode != 0:
             print(f"  STDERR: {result.stderr}")
+            self._last_pip_stderr = result.stderr
             raise RuntimeError(f"pip failed: {result.stderr}")
         return result
 
@@ -238,7 +257,7 @@ class Installer:
 
         version_str = result.stdout.strip()
         try:
-            major, minor = map(int, version_str.split('.'))
+            major, minor = map(int, version_str.split("."))
             py_version = (major, minor)
         except ValueError:
             print(f"  WARNING: Could not parse Python version '{version_str}', skipping insightface pre-install")
@@ -260,19 +279,137 @@ class Installer:
         # The -e flag makes it editable, setup.py handles all pinned versions
         self._run_pip(["-e", ".[tensorrt,controlnet,ipadapter]"], check=True, cwd=self.streamdiffusion_path)
 
+    def phase4b_cuda_link(self):
+        """Phase 4b: Install cuda-link from pre-built wheel (CUDA-IPC zero-copy transport).
+
+        Not covered by any setup.py extra actually installed above (cuda_ipc is intentionally
+        skipped to avoid a source build) — install the compiled wheel directly. Non-fatal: if no
+        wheel exists for this venv's Python, CUDA-IPC falls back to the mirror-DAT transport.
+        """
+        result = self._run_python("import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
+        if result.returncode != 0:
+            print("  WARNING: Could not detect venv Python version, skipping cuda-link pre-install")
+            return
+
+        version_str = result.stdout.strip()
+        try:
+            major, minor = map(int, version_str.split("."))
+            py_version = (major, minor)
+        except ValueError:
+            print(f"  WARNING: Could not parse Python version '{version_str}', skipping cuda-link pre-install")
+            return
+
+        wheel_url = CUDA_LINK_WHEELS.get(py_version)
+        if wheel_url:
+            self._report_progress(f"Installing cuda-link 1.12.1 from pre-built wheel (Python {version_str})...", 4, 8)
+            self._run_pip(["--no-deps", wheel_url], check=False)
+        else:
+            print(f"  WARNING: No pre-built cuda-link wheel for Python {version_str}")
+            print("  CUDA-IPC zero-copy export will fall back to the mirror-DAT transport")
+
+    def phase4c_cuda_link_env(self):
+        """Phase 4c: Persist CUDALINK_LIB_PATH, CUDALINK_DOORBELL, and SDTD_BASE_FOLDER_PATH
+        (Windows only).
+
+        CUDALINK_LIB_PATH -> this venv's site-packages:
+        TouchDesigner's CUDALinkBootstrap.py reads CUDALINK_LIB_PATH at Text DAT import time to
+        enable "library mode" (sys.path injection of the installed cuda_link package, aliasing the
+        14 mirror DAT names). Persisting it here via `setx` means every TD process launched after
+        this install inherits it automatically -- no manual env-var step.
+
+        CUDALINK_DOORBELL=1:
+        Enables the Win32 named-event doorbell so the cuda-link native wait backend reaches its
+        low-latency target instead of silently falling back to poll-sleep. The SD<->TD topology is
+        bidirectional -- TD's Sender and SD's Exporter are each a producer on their own IPC leg --
+        and the doorbell event is only created by a producer whose CUDALINK_DOORBELL=1. TD's Sender
+        runs inside TD's own bundled-Python *process*, which reads its environment from user/system
+        scope only; a runtime `os.environ.setdefault` (as used for
+        CUDALINK_TORCH_GPU_WAIT_ADAPTIVE in td_manager.py) cannot reach a separate process, so this
+        must be persisted here instead. CUDALINK_WAIT_BACKEND is deliberately left unset -- its
+        default "auto" already selects the native path.
+
+        SDTD_BASE_FOLDER_PATH -> this install's base_folder (StreamDiffusion repo root):
+        Same cross-process problem as CUDALINK_DOORBELL -- TD's Python process needs a reliable
+        anchor to the repo root for the inference-side error-report dump
+        (streamdiffusion.utils.diagnostics.write_error_report), and a runtime os.environ.setdefault
+        in td_manager.py can't reach that separate process. Persisting it here means every
+        TD-launched Python inherits it without a manual env-var step.
+
+        setx writes to HKCU\\Environment (user scope) and only affects processes started
+        *after* it runs, so TD must be (re)started after installation to pick it up. This
+        intentionally overwrites any prior manual value (e.g. an older cuda_link_lib\\ target).
+        Non-fatal: if setx fails or this isn't Windows, TD simply falls back to the mirror-DAT
+        classic mode (for CUDALINK_LIB_PATH), the poll-sleep wait backend (for CUDALINK_DOORBELL),
+        or the diagnostics module's own __file__-relative fallback (for SDTD_BASE_FOLDER_PATH).
+        """
+        if sys.platform != "win32":
+            return  # setx is a Windows-only mechanism; non-Windows TD launches are unaffected
+
+        result = self._run_python("import sysconfig; print(sysconfig.get_paths()['purelib'])")
+        if result.returncode != 0 or not result.stdout.strip():
+            print("  WARNING: Could not resolve venv site-packages path, skipping CUDALINK_LIB_PATH setup")
+        else:
+            site_packages = result.stdout.strip()
+            self._report_progress(f"Persisting CUDALINK_LIB_PATH -> {site_packages}", 4, 8)
+            try:
+                setx_result = subprocess.run(
+                    ["setx", "CUDALINK_LIB_PATH", site_packages],
+                    capture_output=True,
+                    text=True,
+                )
+            except OSError as setx_exc:
+                print(f"  WARNING: setx failed to persist CUDALINK_LIB_PATH: {setx_exc}")
+            else:
+                if setx_result.returncode != 0:
+                    print(f"  WARNING: setx failed to persist CUDALINK_LIB_PATH: {setx_result.stderr.strip()}")
+                else:
+                    print("  CUDALINK_LIB_PATH persisted for this user account.")
+                    print("  Restart TouchDesigner (and any open shells) to pick up the new environment variable.")
+
+        # CUDALINK_DOORBELL=1 enables the Win32 named-event doorbell so the cuda-link native wait
+        # backend reaches its low-latency target. Must be set on the *producer* side, and SD's TD
+        # topology is bidirectional (TD Sender + SD Exporter are both producers). TD's Sender runs
+        # in TD's own bundled-Python *process*, which reads env from user/system scope only -- a
+        # runtime os.environ.setdefault in td_manager.py can't reach it, so it must be persisted
+        # here. Independent of the site-packages resolution above, so it runs even if that warned.
+        try:
+            db_result = subprocess.run(["setx", "CUDALINK_DOORBELL", "1"], capture_output=True, text=True)
+        except OSError as setx_exc:
+            print(f"  WARNING: setx failed to persist CUDALINK_DOORBELL: {setx_exc}")
+        else:
+            if db_result.returncode != 0:
+                print(f"  WARNING: setx failed to persist CUDALINK_DOORBELL: {db_result.stderr.strip()}")
+            else:
+                print("  CUDALINK_DOORBELL=1 persisted (enables doorbell/native-wait IPC fast path).")
+
+        # SDTD_BASE_FOLDER_PATH -> repo root, so TD's Python process can locate error_reports/
+        # without a manual env-var step. Independent of the blocks above, so it runs even if
+        # either warned.
+        base_result = subprocess.run(
+            ["setx", "SDTD_BASE_FOLDER_PATH", str(self.base_folder)], capture_output=True, text=True
+        )
+        if base_result.returncode != 0:
+            print(f"  WARNING: setx failed to persist SDTD_BASE_FOLDER_PATH: {base_result.stderr.strip()}")
+        else:
+            print(f"  SDTD_BASE_FOLDER_PATH={self.base_folder} persisted (anchors error-report dumps).")
+
     def phase5_missing_pins(self):
         """Phase 5: Install packages not pinned in setup.py and fix diffusers."""
-        self._report_progress("Installing packages not in setup.py (timm, python-osc, peft)...", 5, 8)
+        self._report_progress("Installing packages not in setup.py (timm, python-osc, peft, hf_xet)...", 5, 8)
         self._run_pip([f"timm{MANUAL_PINS['timm']}"])
         self._run_pip(["python-osc"])  # Required for TouchDesigner OSC communication
         self._run_pip([f"peft=={MANUAL_PINS['peft']}"])  # Required for Cached Attention (StreamV2V)
+        self._run_pip(["hf_xet"])  # Native Xet transport for HuggingFace Hub downloads
 
         # Force reinstall varshith15 diffusers (other deps may have overwritten it)
         self._report_progress("Ensuring varshith15 diffusers fork with kvo_cache support...", 5, 8)
-        self._run_pip([
-            "--force-reinstall", "--no-deps",
-            "diffusers @ git+https://github.com/varshith15/diffusers.git@3e3b72f557e91546894340edabc845e894f00922"
-        ])
+        self._run_pip(
+            [
+                "--force-reinstall",
+                "--no-deps",
+                "diffusers @ git+https://github.com/varshith15/diffusers.git@3e3b72f557e91546894340edabc845e894f00922",
+            ]
+        )
 
     def phase6_conflict_prone(self):
         """Phase 6: Fix conflict-prone packages with --no-deps."""
@@ -280,8 +417,7 @@ class Installer:
 
         # Remove conflicting opencv variants
         subprocess.run(
-            [str(self.python_exe), "-m", "pip", "uninstall", "-y",
-             "opencv-python-headless", "opencv-contrib-python"],
+            [str(self.python_exe), "-m", "pip", "uninstall", "-y", "opencv-python-headless", "opencv-contrib-python"],
             capture_output=True,
         )
 
@@ -289,12 +425,21 @@ class Installer:
         self._run_pip(["--no-deps", f"opencv-python=={MANUAL_PINS['opencv-python']}"])
 
     def phase7_numpy_lock(self):
-        """Phase 7: Final numpy and protobuf lock (other packages may have upgraded them)."""
+        """Phase 7: Final numpy/protobuf lock + security floor pins."""
         self._report_progress(f"Final numpy lock (numpy=={MANUAL_PINS['numpy']})...", 7, 8)
         self._run_pip([f"numpy=={MANUAL_PINS['numpy']}", "--force-reinstall"])
 
         self._report_progress(f"Final protobuf lock (protobuf=={MANUAL_PINS['protobuf']})...", 7, 8)
         self._run_pip([f"protobuf=={MANUAL_PINS['protobuf']}", "--force-reinstall"])
+
+        self._report_progress("Applying security floor pins (idna, Mako, urllib3)...", 7, 8)
+        self._run_pip(
+            [
+                f"idna{MANUAL_PINS['idna']}",
+                f"Mako{MANUAL_PINS['Mako']}",
+                f"urllib3{MANUAL_PINS['urllib3']}",
+            ]
+        )
 
     def phase8_verify(self) -> bool:
         """Phase 8: Verify installation with import tests."""
@@ -303,6 +448,31 @@ class Installer:
         self._report_progress("Verifying installation...", 8, 8)
         verifier = Verifier(str(self.python_exe))
         return verifier.run_all()
+
+    def _write_install_error_report(self, exc: BaseException) -> None:
+        """Best-effort diagnostic dump on install failure. Never raises -- a bug here must
+        not mask the real installation error, which the caller re-raises regardless."""
+        try:
+            from .report import write_error_report
+
+            report_path = write_error_report(
+                self.base_folder / "error_reports",
+                {
+                    "stage": "installation",
+                    "exc": exc,
+                    "phase": self.current_phase,
+                    "python_exe": str(self.python_exe),
+                    "base_folder": str(self.base_folder),
+                    "cuda_version": self.cuda_version,
+                    "pytorch_config": self.pytorch_config,
+                    "venv_path": str(self.venv_path),
+                    "pip_stderr": self._last_pip_stderr,
+                },
+            )
+            if report_path:
+                print(f"\n  Error report written to: {report_path}")
+        except Exception as report_exc:
+            print(f"  WARNING: Failed to generate error report: {report_exc}")
 
     def install(self, python_exe: Optional[str] = None) -> bool:
         """
@@ -315,7 +485,7 @@ class Installer:
             True if installation and verification succeeded.
         """
         print("=" * 50)
-        print(" StreamDiffusionTD v0.3.1 Installation")
+        print(" StreamDiffusionTD v0.4.0 Installation")
         print(" Daydream Fork with StreamV2V")
         print("=" * 50)
         print()
@@ -326,16 +496,30 @@ class Installer:
         # Create venv if needed
         self.create_venv(python_exe)
 
-        # Run installation phases
-        self.phase1_foundation()
-        self.phase2_pytorch()
-        self.phase3_xformers()
-        self.phase3b_insightface()  # Pre-install insightface from wheel (Windows)
-        self.phase4_streamdiffusion()
-        self.phase5_missing_pins()
-        self.phase6_conflict_prone()
-        self.phase7_numpy_lock()
-        success = self.phase8_verify()
+        # Run installation phases. current_phase is tracked so a failure report (see
+        # _write_install_error_report) can name the phase that was running when it broke.
+        phases = [
+            ("phase1_foundation", self.phase1_foundation),
+            ("phase2_pytorch", self.phase2_pytorch),
+            ("phase3_xformers", self.phase3_xformers),
+            ("phase3b_insightface", self.phase3b_insightface),  # insightface from wheel (Windows)
+            ("phase4_streamdiffusion", self.phase4_streamdiffusion),
+            ("phase4b_cuda_link", self.phase4b_cuda_link),  # cuda-link from wheel (CUDA-IPC transport)
+            ("phase4c_cuda_link_env", self.phase4c_cuda_link_env),  # CUDALINK_LIB_PATH -> venv (TD library mode)
+            ("phase5_missing_pins", self.phase5_missing_pins),
+            ("phase6_conflict_prone", self.phase6_conflict_prone),
+            ("phase7_numpy_lock", self.phase7_numpy_lock),
+        ]
+
+        try:
+            for name, phase_fn in phases:
+                self.current_phase = name
+                phase_fn()
+            self.current_phase = "phase8_verify"
+            success = self.phase8_verify()
+        except Exception as exc:
+            self._write_install_error_report(exc)
+            raise
 
         print()
         print("=" * 50)
@@ -374,7 +558,7 @@ class Installer:
 
         content = f'''@echo off
 echo ========================================
-echo  StreamDiffusionTD v0.3.1 Installation
+echo  StreamDiffusionTD v0.4.0 Installation
 echo  Daydream Fork with StreamV2V
 echo ========================================
 
@@ -386,7 +570,7 @@ cd StreamDiffusion-installer
 pause
 '''
 
-        with open(output_path, 'w', encoding='utf-8') as f:
+        with open(output_path, "w", encoding="utf-8") as f:
             f.write(content)
 
         print(f"Generated batch file: {output_path}")
