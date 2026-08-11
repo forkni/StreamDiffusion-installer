@@ -80,8 +80,8 @@ PYTORCH_CONFIGS = {
         "xformers": None,  # Skip - causes conflicts
     },
     "cu128": {
-        "torch": "2.8.0",
-        "torchvision": "0.23.0",
+        "torch": "2.11.0",
+        "torchvision": "0.26.0",
         "torchaudio": None,
         "index_url": "https://download.pytorch.org/whl/cu128",
         "cuda_python": "12.9.0",
