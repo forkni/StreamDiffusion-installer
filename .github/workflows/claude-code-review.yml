@@ -5,7 +5,9 @@ on:
     types: [opened, synchronize, reopened, ready_for_review]
     # base-branch filter: PRs *into* main, or into the deps stack that
     # feat/installer-error-report chains on, so Claude fires on both stacked PRs.
-    branches: [main, deps/cuda-link-1.12-torch-modelopt-onnx]
+    # fork-review/SDTD_040_installer added: a review-gate mirror of the upstream base used
+    # to pre-emptively run this action on topic branches before they're proposed upstream.
+    branches: [main, deps/cuda-link-1.12-torch-modelopt-onnx, fork-review/SDTD_040_installer]
 
 jobs:
   review:
