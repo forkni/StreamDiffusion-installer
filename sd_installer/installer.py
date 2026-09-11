@@ -341,7 +341,7 @@ class Installer:
             print("  CUDA-IPC zero-copy export will fall back to the mirror-DAT transport")
 
     def phase4c_cuda_link_env(self):
-        """Phase 4c: Persist CUDALINK_DOORBELL and SDTD_BASE_FOLDER_PATH (Windows only).
+        """Phase 4c: Persist CUDALINK_DOORBELL (Windows only).
 
         cuda_link library resolution no longer uses an env var: TouchDesigner's
         cuda_link_bootstrap.py resolves the installed package via a layered lookup instead
@@ -361,18 +361,18 @@ class Installer:
         must be persisted here instead. CUDALINK_WAIT_BACKEND is deliberately left unset -- its
         default "auto" already selects the native path.
 
-        SDTD_BASE_FOLDER_PATH -> this install's base_folder (StreamDiffusion repo root):
-        Same cross-process problem as CUDALINK_DOORBELL -- TD's Python process needs a reliable
-        anchor to the repo root for the inference-side error-report dump
-        (streamdiffusion.utils.diagnostics.write_error_report), and a runtime os.environ.setdefault
-        in td_manager.py can't reach that separate process. Persisting it here means every
-        TD-launched Python inherits it without a manual env-var step.
+        SDTD_BASE_FOLDER_PATH is retired: it was a second machine-wide setx slot (like the
+        now-retired CUDALINK_LIB_PATH) and shared its failure mode -- one value, last install
+        wins, so a second StreamDiffusion install on the same machine silently pointed the
+        first install's error-report dumps at the wrong repo root.
+        streamdiffusion.utils.diagnostics.write_error_report already falls back to a
+        __file__-relative repo root when the env var is unset, and that fallback is inherently
+        anchored to whichever install actually crashed, so nothing replaces this setx call.
 
         setx writes to HKCU\\Environment (user scope) and only affects processes started
-        *after* it runs, so a fresh TD session is needed to pick up either variable. Non-fatal:
-        if setx fails or this isn't Windows, TD falls back to the poll-sleep wait backend (for
-        CUDALINK_DOORBELL) or the diagnostics module's own __file__-relative fallback (for
-        SDTD_BASE_FOLDER_PATH).
+        *after* it runs, so a fresh TD session is needed to pick up CUDALINK_DOORBELL.
+        Non-fatal: if setx fails or this isn't Windows, TD falls back to the poll-sleep wait
+        backend.
         """
         if sys.platform != "win32":
             return  # setx is a Windows-only mechanism; non-Windows TD launches are unaffected
@@ -392,17 +392,6 @@ class Installer:
                 print(f"  WARNING: setx failed to persist CUDALINK_DOORBELL: {db_result.stderr.strip()}")
             else:
                 print("  CUDALINK_DOORBELL=1 persisted (enables doorbell/native-wait IPC fast path).")
-
-        # SDTD_BASE_FOLDER_PATH -> repo root, so TD's Python process can locate error_reports/
-        # without a manual env-var step. Independent of the blocks above, so it runs even if
-        # either warned.
-        base_result = subprocess.run(
-            ["setx", "SDTD_BASE_FOLDER_PATH", str(self.base_folder)], capture_output=True, text=True
-        )
-        if base_result.returncode != 0:
-            print(f"  WARNING: setx failed to persist SDTD_BASE_FOLDER_PATH: {base_result.stderr.strip()}")
-        else:
-            print(f"  SDTD_BASE_FOLDER_PATH={self.base_folder} persisted (anchors error-report dumps).")
 
     def phase5_missing_pins(self):
         """Phase 5: Install packages not pinned in setup.py and fix diffusers."""
@@ -553,7 +542,7 @@ class Installer:
             ("phase3b_insightface", self.phase3b_insightface),  # insightface from wheel (Windows)
             ("phase4_streamdiffusion", self.phase4_streamdiffusion),
             ("phase4b_cuda_link", self.phase4b_cuda_link),  # cuda-link from wheel (CUDA-IPC transport)
-            ("phase4c_cuda_link_env", self.phase4c_cuda_link_env),  # CUDALINK_DOORBELL, SDTD_BASE_FOLDER_PATH
+            ("phase4c_cuda_link_env", self.phase4c_cuda_link_env),  # CUDALINK_DOORBELL
             ("phase5_missing_pins", self.phase5_missing_pins),
             ("phase6_conflict_prone", self.phase6_conflict_prone),
             ("phase7_numpy_lock", self.phase7_numpy_lock),

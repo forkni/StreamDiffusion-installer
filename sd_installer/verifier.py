@@ -106,7 +106,6 @@ VERIFICATION_CHECKS = [
         "        except FileNotFoundError:\n"
         "            return None\n"
         "    assert get('CUDALINK_DOORBELL') == '1', 'CUDALINK_DOORBELL != 1'\n"
-        "    assert get('SDTD_BASE_FOLDER_PATH'), 'SDTD_BASE_FOLDER_PATH missing'\n"
         "    print('OK')\n",
         "cuda-link environment variables (phase4c setx)",
     ),
