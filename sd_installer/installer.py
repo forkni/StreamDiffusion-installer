@@ -341,14 +341,14 @@ class Installer:
             print("  CUDA-IPC zero-copy export will fall back to the mirror-DAT transport")
 
     def phase4c_cuda_link_env(self):
-        """Phase 4c: Persist CUDALINK_LIB_PATH, CUDALINK_DOORBELL, and SDTD_BASE_FOLDER_PATH
-        (Windows only).
+        """Phase 4c: Persist CUDALINK_DOORBELL and SDTD_BASE_FOLDER_PATH (Windows only).
 
-        CUDALINK_LIB_PATH -> this venv's site-packages:
-        TouchDesigner's CUDALinkBootstrap.py reads CUDALINK_LIB_PATH at Text DAT import time to
-        enable "library mode" (sys.path injection of the installed cuda_link package, aliasing the
-        14 mirror DAT names). Persisting it here via `setx` means every TD process launched after
-        this install inherits it automatically -- no manual env-var step.
+        cuda_link library resolution no longer uses an env var: TouchDesigner's
+        cuda_link_bootstrap.py resolves the installed package via a layered lookup instead
+        (explicit argument -> Basefolder par -> dotsimulate config file -> plain `import
+        cuda_link` off TD's existing sys.path / Preferences module path). CUDALINK_LIB_PATH
+        is retired -- setting it has no effect on resolution anymore, so this phase no
+        longer persists it.
 
         CUDALINK_DOORBELL=1:
         Enables the Win32 named-event doorbell so the cuda-link native wait backend reaches its
@@ -369,42 +369,20 @@ class Installer:
         TD-launched Python inherits it without a manual env-var step.
 
         setx writes to HKCU\\Environment (user scope) and only affects processes started
-        *after* it runs, so TD must be (re)started after installation to pick it up. This
-        intentionally overwrites any prior manual value (e.g. an older cuda_link_lib\\ target).
-        Non-fatal: if setx fails or this isn't Windows, TD simply falls back to the mirror-DAT
-        classic mode (for CUDALINK_LIB_PATH), the poll-sleep wait backend (for CUDALINK_DOORBELL),
-        or the diagnostics module's own __file__-relative fallback (for SDTD_BASE_FOLDER_PATH).
+        *after* it runs, so a fresh TD session is needed to pick up either variable. Non-fatal:
+        if setx fails or this isn't Windows, TD falls back to the poll-sleep wait backend (for
+        CUDALINK_DOORBELL) or the diagnostics module's own __file__-relative fallback (for
+        SDTD_BASE_FOLDER_PATH).
         """
         if sys.platform != "win32":
             return  # setx is a Windows-only mechanism; non-Windows TD launches are unaffected
-
-        result = self._run_python("import sysconfig; print(sysconfig.get_paths()['purelib'])")
-        if result.returncode != 0 or not result.stdout.strip():
-            print("  WARNING: Could not resolve venv site-packages path, skipping CUDALINK_LIB_PATH setup")
-        else:
-            site_packages = result.stdout.strip()
-            self._report_progress(f"Persisting CUDALINK_LIB_PATH -> {site_packages}", 4, 8)
-            try:
-                setx_result = subprocess.run(
-                    ["setx", "CUDALINK_LIB_PATH", site_packages],
-                    capture_output=True,
-                    text=True,
-                )
-            except OSError as setx_exc:
-                print(f"  WARNING: setx failed to persist CUDALINK_LIB_PATH: {setx_exc}")
-            else:
-                if setx_result.returncode != 0:
-                    print(f"  WARNING: setx failed to persist CUDALINK_LIB_PATH: {setx_result.stderr.strip()}")
-                else:
-                    print("  CUDALINK_LIB_PATH persisted for this user account.")
-                    print("  Restart TouchDesigner (and any open shells) to pick up the new environment variable.")
 
         # CUDALINK_DOORBELL=1 enables the Win32 named-event doorbell so the cuda-link native wait
         # backend reaches its low-latency target. Must be set on the *producer* side, and SD's TD
         # topology is bidirectional (TD Sender + SD Exporter are both producers). TD's Sender runs
         # in TD's own bundled-Python *process*, which reads env from user/system scope only -- a
         # runtime os.environ.setdefault in td_manager.py can't reach it, so it must be persisted
-        # here. Independent of the site-packages resolution above, so it runs even if that warned.
+        # here.
         try:
             db_result = subprocess.run(["setx", "CUDALINK_DOORBELL", "1"], capture_output=True, text=True)
         except OSError as setx_exc:
@@ -575,7 +553,7 @@ class Installer:
             ("phase3b_insightface", self.phase3b_insightface),  # insightface from wheel (Windows)
             ("phase4_streamdiffusion", self.phase4_streamdiffusion),
             ("phase4b_cuda_link", self.phase4b_cuda_link),  # cuda-link from wheel (CUDA-IPC transport)
-            ("phase4c_cuda_link_env", self.phase4c_cuda_link_env),  # CUDALINK_LIB_PATH -> venv (TD library mode)
+            ("phase4c_cuda_link_env", self.phase4c_cuda_link_env),  # CUDALINK_DOORBELL, SDTD_BASE_FOLDER_PATH
             ("phase5_missing_pins", self.phase5_missing_pins),
             ("phase6_conflict_prone", self.phase6_conflict_prone),
             ("phase7_numpy_lock", self.phase7_numpy_lock),

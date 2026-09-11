@@ -92,19 +92,19 @@ VERIFICATION_CHECKS = [
     ),
     (
         "cuda-link environment variables",
+        # CUDALINK_LIB_PATH is retired: cuda_link resolution no longer depends on an env
+        # var (see cuda_link_bootstrap.py's layered lookup), so it is not checked here.
         "import sys\n"
         "if sys.platform != 'win32':\n"
         "    print('SKIP')\n"
         "else:\n"
-        "    import os, winreg\n"
+        "    import winreg\n"
         "    key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, 'Environment')\n"
         "    def get(name):\n"
         "        try:\n"
         "            return winreg.QueryValueEx(key, name)[0]\n"
         "        except FileNotFoundError:\n"
         "            return None\n"
-        "    lib_path = get('CUDALINK_LIB_PATH')\n"
-        "    assert lib_path and os.path.isdir(lib_path), f'CUDALINK_LIB_PATH missing or not a dir: {lib_path}'\n"
         "    assert get('CUDALINK_DOORBELL') == '1', 'CUDALINK_DOORBELL != 1'\n"
         "    assert get('SDTD_BASE_FOLDER_PATH'), 'SDTD_BASE_FOLDER_PATH missing'\n"
         "    print('OK')\n",
